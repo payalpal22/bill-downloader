@@ -1,0 +1,5 @@
+downloaded_bills/
+downloaded_bills_session/
+*.zip
+failed_bills.txt
+__pycache__/
