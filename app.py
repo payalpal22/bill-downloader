@@ -4,6 +4,7 @@ import re
 import shutil
 import zipfile
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import streamlit as st
 import requests
 from playwright.sync_api import sync_playwright
