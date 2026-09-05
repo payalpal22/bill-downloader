@@ -212,7 +212,7 @@ def execute_downloads(entries, progress_bar, status_text, log_area):
             zf.writestr("failed_bills.txt", "\n".join(failed))
 
     zip_buffer.seek(0)
-    return zip_buffer, len(failed)d
+    return zip_buffer, len(failed)
     # Create ZIP archive
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
