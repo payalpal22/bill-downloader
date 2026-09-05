@@ -100,72 +100,6 @@ def parse_uploaded_file(uploaded_file):
 
     return entries, rows[header_row_idx]
 
-def download_single_invoice(context, name, link, total, progress_tracker, log_messages, log_area):
-    out_path = TEMP_DIR / f"{name}.pdf"
-    pdf_bytes = []
-    downloaded = False
-    page = context.new_page()
-
-    # Block heavy tracking and media to speed up load time
-    page.route("**/*", lambda route: route.abort() 
-               if route.request.resource_type in ["image", "media", "font"] 
-               else route.continue_())
-
-    def intercept_pdf(response):
-        try:
-            ctype = response.headers.get("content-type", "").lower()
-            if "application/pdf" in ctype or ".pdf" in response.url.lower():
-                b = response.body()
-                if len(b) > 2000:
-                    pdf_bytes.append(b)
-        except Exception:
-            pass
-
-    page.on("response", intercept_pdf)
-
-    try:
-        page.goto(link, wait_until="domcontentloaded", timeout=15000)
-        page.wait_for_timeout(1000)
-
-        # Strategy A: Captured raw PDF stream
-        if pdf_bytes:
-            with open(out_path, "wb") as f:
-                f.write(pdf_bytes[-1])
-            downloaded = True
-
-        # Strategy B: Fast DOM PDF render
-        if not downloaded:
-            page.evaluate("""() => {
-                const hideList = ['nav', 'header', '.sidebar', '[class*="sidebar"]', '[class*="banner"]', '[class*="drawer"]'];
-                hideList.forEach(sel => {
-                    document.querySelectorAll(sel).forEach(el => el.style.display = 'none');
-                });
-            }""")
-            page.pdf(
-                path=str(out_path),
-                format="A4",
-                print_background=True,
-                margin={"top": "8mm", "bottom": "8mm", "left": "8mm", "right": "8mm"}
-            )
-            downloaded = True
-
-        if downloaded and out_path.exists() and out_path.stat().st_size > 1000:
-            msg = f"✅ [{progress_tracker['count']}/{total}] Done: {name}.pdf"
-            error = None
-        else:
-            raise Exception("File empty or not generated")
-
-    except Exception as e:
-        msg = f"❌ [{progress_tracker['count']}/{total}] Failed: {name}"
-        error = f"{name} | {link} | {e}"
-    finally:
-        page.close()
-
-    progress_tracker['count'] += 1
-    log_messages.append(msg)
-    log_area.text_area("Download Terminal Logs", value="\n".join(log_messages[-15:]), height=220)
-    return error
-
 def execute_downloads(entries, progress_bar, status_text, log_area):
     if TEMP_DIR.exists():
         shutil.rmtree(TEMP_DIR)
@@ -179,16 +113,15 @@ def execute_downloads(entries, progress_bar, status_text, log_area):
         browser = p.chromium.launch(
             headless=True,
             args=[
-                "--no-sandbox",
-                "--disable-gpu",
-                "--disable-dev-shm-usage",
                 "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-web-security"
             ],
         )
         context = browser.new_context(
             user_agent=REAL_UA,
-            viewport={"width": 1440, "height": 1080},
-            accept_downloads=True,
+            viewport={"width": 1440, "height": 950},
+            accept_downloads=True
         )
         page = context.new_page()
 
@@ -198,10 +131,12 @@ def execute_downloads(entries, progress_bar, status_text, log_area):
             out_path = TEMP_DIR / f"{name}.pdf"
             pdf_bytes = []
 
+            # 1. Listen for raw PDF stream in network traffic
             def intercept_pdf(response):
                 try:
                     ctype = response.headers.get("content-type", "").lower()
-                    if "application/pdf" in ctype or ".pdf" in response.url.lower():
+                    url = response.url.lower()
+                    if "application/pdf" in ctype or ".pdf" in url:
                         b = response.body()
                         if len(b) > 2000:
                             pdf_bytes.append(b)
@@ -211,28 +146,10 @@ def execute_downloads(entries, progress_bar, status_text, log_area):
             page.on("response", intercept_pdf)
 
             try:
-                page.goto(link, wait_until="networkidle", timeout=30000)
+                page.goto(link, wait_until="networkidle", timeout=40000)
+                page.wait_for_timeout(2500)
 
-                # 1. Wait for "Redirecting" splash screen to vanish
-                try:
-                    page.wait_for_selector(
-                        "text=Redirecting to SharedLedger",
-                        state="detached",
-                        timeout=15000,
-                    )
-                except Exception:
-                    pass
-
-                # 2. Wait until actual invoice content is visible on page
-                try:
-                    page.wait_for_selector(
-                        "text=/TAX INVOICE|Invoice No|Total Amount|Bill To/i",
-                        timeout=15000,
-                    )
-                except Exception:
-                    page.wait_for_timeout(3000)
-
-                # Click invoice entry card if listed in ledger
+                # Click invoice card in ledger if needed
                 try:
                     card = page.locator(f"text={name}").first
                     if card.count() > 0 and card.is_visible():
@@ -243,23 +160,21 @@ def execute_downloads(entries, progress_bar, status_text, log_area):
 
                 downloaded = False
 
-                # Strategy A: Intercepted raw PDF download stream
+                # Strategy A: Check intercepted PDF stream
                 if pdf_bytes:
                     with open(out_path, "wb") as f:
                         f.write(pdf_bytes[-1])
                     downloaded = True
 
-                # Strategy B: UI Download Button
+                # Strategy B: Try download button click
                 if not downloaded:
-                    download_icons = page.locator(
-                        "header button, div[class*='header'] button, [aria-label*='download' i], svg"
-                    )
-                    for i in range(min(6, download_icons.count())):
+                    download_icons = page.locator("header button, div[class*='header'] button, [aria-label*='download' i], svg")
+                    for i in range(min(10, download_icons.count())):
                         btn = download_icons.nth(i)
                         try:
                             box = btn.bounding_box()
-                            if box and box["y"] < 120 and box["x"] > 700:
-                                with page.expect_download(timeout=3000) as dl_info:
+                            if box and box['y'] < 100 and box['x'] > 750:
+                                with page.expect_download(timeout=2500) as dl_info:
                                     btn.click(force=True)
                                 dl = dl_info.value
                                 dl.save_as(out_path)
@@ -268,10 +183,11 @@ def execute_downloads(entries, progress_bar, status_text, log_area):
                         except Exception:
                             continue
 
-                # Strategy C: Print clean DOM (hide unwanted banners and sidebar controls)
+                # Strategy C: Capture clean Invoice DOM (removes ledger, dashboard sidebar, and promo banners)
                 if not downloaded:
                     page.evaluate("""() => {
-                        const hideList = ['nav', 'header', '.sidebar', '[class*="sidebar"]', '[class*="banner"]', '[class*="drawer"]'];
+                        // Hide everything except the invoice container
+                        const hideList = ['nav', 'header', '.sidebar', '[class*="sidebar"]', '[class*="banner"]', '[class*="drawer"]', '[class*="login"]'];
                         hideList.forEach(sel => {
                             document.querySelectorAll(sel).forEach(el => el.style.display = 'none');
                         });
@@ -281,26 +197,26 @@ def execute_downloads(entries, progress_bar, status_text, log_area):
                         path=str(out_path),
                         format="A4",
                         print_background=True,
-                        margin={"top": "5mm", "bottom": "5mm", "left": "5mm", "right": "5mm"},
+                        margin={"top": "8mm", "bottom": "8mm", "left": "8mm", "right": "8mm"}
                     )
                     downloaded = True
 
                 if downloaded and out_path.exists() and out_path.stat().st_size > 1000:
-                    log_messages.append(f"✅ [{idx}/{total}] Saved: {name}.pdf")
+                    log_messages.append(f"✅ [{idx}/{total}] Downloaded: {name}.pdf")
                 else:
-                    raise Exception("PDF file not generated")
+                    raise Exception("PDF file save nahi hui.")
 
             except Exception as e:
-                log_messages.append(f"❌ [{idx}/{total}] Failed: {name}")
+                log_messages.append(f"❌ [{idx}/{total}] Failed: {name} ({e})")
                 failed.append(f"{name} | {link} | {e}")
             finally:
                 page.remove_listener("response", intercept_pdf)
 
-            log_area.text_area("Download Terminal Logs", value="\n".join(log_messages[-12:]), height=200)
+            log_area.text_area("Download Terminal Logs", value="\n".join(log_messages), height=220)
 
         browser.close()
 
-    # Create ZIP
+    # Create ZIP archive
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         for file in TEMP_DIR.glob("*.pdf"):
@@ -310,8 +226,6 @@ def execute_downloads(entries, progress_bar, status_text, log_area):
 
     zip_buffer.seek(0)
     return zip_buffer, len(failed)
-
-   
 
 # --- Streamlit UI ---
 
@@ -332,34 +246,26 @@ if uploaded_file is not None:
 
         st.info(f"Headers auto-detected: `{', '.join([str(h) for h in detected_headers if h])}`")
 
-        # --- Action Controls in UI ---
-        test_mode = st.checkbox("🧪 Test Mode (Download only the first bill to verify)", value=False)
-
-        if st.button("Start Download", type="primary", use_container_width=True):
-            # Slice list to 1 item if test mode is enabled
-            entries_to_process = entries[:1] if test_mode else entries
-
+        if st.button("Start Batch Download", type="primary", use_container_width=True):
             progress_bar = st.progress(0)
             status_text = st.empty()
             log_area = st.empty()
 
-            with st.spinner("Processing..."):
-                zip_data, fail_count = execute_downloads(
-                    entries_to_process, progress_bar, status_text, log_area
-                )
+            with st.spinner("Downloading bills in background..."):
+                zip_data, fail_count = execute_downloads(entries, progress_bar, status_text, log_area)
 
             status_text.empty()
             if fail_count == 0:
-                st.success(f"Processed {len(entries_to_process)} invoice(s) successfully!")
+                st.success(f"All {len(entries)} invoices downloaded successfully!")
             else:
                 st.warning(f"Completed with {fail_count} failed items. Details saved in 'failed_bills.txt'.")
 
             st.download_button(
                 label="📦 Download Bills (ZIP File)",
                 data=zip_data,
-                file_name="test_invoice.zip" if test_mode else "all_downloaded_bills.zip",
+                file_name="all_downloaded_bills.zip",
                 mime="application/zip",
-                use_container_width=True,
+                use_container_width=True
             )
 
     except Exception as e:
