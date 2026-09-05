@@ -246,26 +246,34 @@ if uploaded_file is not None:
 
         st.info(f"Headers auto-detected: `{', '.join([str(h) for h in detected_headers if h])}`")
 
-        if st.button("Start Batch Download", type="primary", use_container_width=True):
+        # --- Action Controls in UI ---
+        test_mode = st.checkbox("🧪 Test Mode (Download only the first bill to verify)", value=False)
+
+        if st.button("Start Download", type="primary", use_container_width=True):
+            # Slice list to 1 item if test mode is enabled
+            entries_to_process = entries[:1] if test_mode else entries
+
             progress_bar = st.progress(0)
             status_text = st.empty()
             log_area = st.empty()
 
-            with st.spinner("Downloading bills in background..."):
-                zip_data, fail_count = execute_downloads(entries, progress_bar, status_text, log_area)
+            with st.spinner("Processing..."):
+                zip_data, fail_count = execute_downloads(
+                    entries_to_process, progress_bar, status_text, log_area
+                )
 
             status_text.empty()
             if fail_count == 0:
-                st.success(f"All {len(entries)} invoices downloaded successfully!")
+                st.success(f"Processed {len(entries_to_process)} invoice(s) successfully!")
             else:
                 st.warning(f"Completed with {fail_count} failed items. Details saved in 'failed_bills.txt'.")
 
             st.download_button(
                 label="📦 Download Bills (ZIP File)",
                 data=zip_data,
-                file_name="all_downloaded_bills.zip",
+                file_name="test_invoice.zip" if test_mode else "all_downloaded_bills.zip",
                 mime="application/zip",
-                use_container_width=True
+                use_container_width=True,
             )
 
     except Exception as e:
