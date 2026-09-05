@@ -182,24 +182,15 @@ def execute_downloads(entries, progress_bar, status_text, log_area):
                 "--no-sandbox",
                 "--disable-gpu",
                 "--disable-dev-shm-usage",
-                "--disable-extensions",
                 "--disable-blink-features=AutomationControlled",
-            ]
+            ],
         )
         context = browser.new_context(
             user_agent=REAL_UA,
-            viewport={"width": 1280, "height": 850},
+            viewport={"width": 1440, "height": 1080},
             accept_downloads=True,
         )
         page = context.new_page()
-
-        # Block media, fonts, and heavy trackers to accelerate loading
-        page.route(
-            "**/*",
-            lambda route: route.abort()
-            if route.request.resource_type in ["image", "media", "font"]
-            else route.continue_()
-        )
 
         for idx, (name, link) in enumerate(entries, start=1):
             status_text.markdown(f"**Processing ({idx}/{total}):** `{name}`")
@@ -220,21 +211,39 @@ def execute_downloads(entries, progress_bar, status_text, log_area):
             page.on("response", intercept_pdf)
 
             try:
-                page.goto(link, wait_until="domcontentloaded", timeout=20000)
-                page.wait_for_timeout(1200)
+                page.goto(link, wait_until="networkidle", timeout=30000)
 
-                # Attempt clicking ledger entry card if visible
+                # 1. Wait for "Redirecting" splash screen to vanish
+                try:
+                    page.wait_for_selector(
+                        "text=Redirecting to SharedLedger",
+                        state="detached",
+                        timeout=15000,
+                    )
+                except Exception:
+                    pass
+
+                # 2. Wait until actual invoice content is visible on page
+                try:
+                    page.wait_for_selector(
+                        "text=/TAX INVOICE|Invoice No|Total Amount|Bill To/i",
+                        timeout=15000,
+                    )
+                except Exception:
+                    page.wait_for_timeout(3000)
+
+                # Click invoice entry card if listed in ledger
                 try:
                     card = page.locator(f"text={name}").first
                     if card.count() > 0 and card.is_visible():
                         card.click()
-                        page.wait_for_timeout(1000)
+                        page.wait_for_timeout(2000)
                 except Exception:
                     pass
 
                 downloaded = False
 
-                # Strategy A: Raw intercepted PDF stream
+                # Strategy A: Intercepted raw PDF download stream
                 if pdf_bytes:
                     with open(out_path, "wb") as f:
                         f.write(pdf_bytes[-1])
@@ -242,13 +251,15 @@ def execute_downloads(entries, progress_bar, status_text, log_area):
 
                 # Strategy B: UI Download Button
                 if not downloaded:
-                    download_icons = page.locator("header button, div[class*='header'] button, [aria-label*='download' i], svg")
+                    download_icons = page.locator(
+                        "header button, div[class*='header'] button, [aria-label*='download' i], svg"
+                    )
                     for i in range(min(6, download_icons.count())):
                         btn = download_icons.nth(i)
                         try:
                             box = btn.bounding_box()
-                            if box and box["y"] < 100 and box["x"] > 700:
-                                with page.expect_download(timeout=2000) as dl_info:
+                            if box and box["y"] < 120 and box["x"] > 700:
+                                with page.expect_download(timeout=3000) as dl_info:
                                     btn.click(force=True)
                                 dl = dl_info.value
                                 dl.save_as(out_path)
@@ -257,7 +268,7 @@ def execute_downloads(entries, progress_bar, status_text, log_area):
                         except Exception:
                             continue
 
-                # Strategy C: Direct DOM Print
+                # Strategy C: Print clean DOM (hide unwanted banners and sidebar controls)
                 if not downloaded:
                     page.evaluate("""() => {
                         const hideList = ['nav', 'header', '.sidebar', '[class*="sidebar"]', '[class*="banner"]', '[class*="drawer"]'];
@@ -265,18 +276,19 @@ def execute_downloads(entries, progress_bar, status_text, log_area):
                             document.querySelectorAll(sel).forEach(el => el.style.display = 'none');
                         });
                     }""")
+                    page.wait_for_timeout(1000)
                     page.pdf(
                         path=str(out_path),
                         format="A4",
                         print_background=True,
-                        margin={"top": "8mm", "bottom": "8mm", "left": "8mm", "right": "8mm"}
+                        margin={"top": "5mm", "bottom": "5mm", "left": "5mm", "right": "5mm"},
                     )
                     downloaded = True
 
                 if downloaded and out_path.exists() and out_path.stat().st_size > 1000:
                     log_messages.append(f"✅ [{idx}/{total}] Saved: {name}.pdf")
                 else:
-                    raise Exception("PDF file was not created or is corrupt.")
+                    raise Exception("PDF file not generated")
 
             except Exception as e:
                 log_messages.append(f"❌ [{idx}/{total}] Failed: {name}")
@@ -288,7 +300,7 @@ def execute_downloads(entries, progress_bar, status_text, log_area):
 
         browser.close()
 
-    # Zip output files
+    # Create ZIP
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         for file in TEMP_DIR.glob("*.pdf"):
@@ -298,6 +310,8 @@ def execute_downloads(entries, progress_bar, status_text, log_area):
 
     zip_buffer.seek(0)
     return zip_buffer, len(failed)
+
+   
 
 # --- Streamlit UI ---
 
