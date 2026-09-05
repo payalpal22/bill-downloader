@@ -5,7 +5,6 @@ import shutil
 import zipfile
 from pathlib import Path
 import streamlit as st
-import requests
 from playwright.sync_api import sync_playwright
 
 st.set_page_config(
@@ -183,10 +182,9 @@ def execute_downloads(entries, progress_bar, status_text, log_area):
                         except Exception:
                             continue
 
-                # Strategy C: Capture clean Invoice DOM (removes ledger, dashboard sidebar, and promo banners)
+                # Strategy C: Capture clean Invoice DOM
                 if not downloaded:
                     page.evaluate("""() => {
-                        // Hide everything except the invoice container
                         const hideList = ['nav', 'header', '.sidebar', '[class*="sidebar"]', '[class*="banner"]', '[class*="drawer"]', '[class*="login"]'];
                         hideList.forEach(sel => {
                             document.querySelectorAll(sel).forEach(el => el.style.display = 'none');
@@ -250,7 +248,6 @@ if uploaded_file is not None:
         test_mode = st.checkbox("🧪 Test Mode (Download only the first bill to verify)", value=False)
 
         if st.button("Start Download", type="primary", use_container_width=True):
-            # Slice list to 1 item if test mode is enabled
             entries_to_process = entries[:1] if test_mode else entries
 
             progress_bar = st.progress(0)
