@@ -4,7 +4,6 @@ import re
 import shutil
 import zipfile
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import streamlit as st
 import requests
 from playwright.sync_api import sync_playwright
@@ -175,46 +174,121 @@ def execute_downloads(entries, progress_bar, status_text, log_area):
     failed = []
     log_messages = []
     total = len(entries)
-    progress_tracker = {'count': 1}
 
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=True,
-            args=["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"]
-        )
-        context = browser.new_context(user_agent=REAL_UA, viewport={"width": 1280, "height": 800})
-
-        # Process 4 tabs concurrently
-        max_workers = 4
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = [
-                executor.submit(
-                    download_single_invoice,
-                    context, name, link, total, progress_tracker, log_messages, log_area
-                )
-                for name, link in entries
+            args=[
+                "--no-sandbox",
+                "--disable-gpu",
+                "--disable-dev-shm-usage",
+                "--disable-extensions",
+                "--disable-blink-features=AutomationControlled",
             ]
+        )
+        context = browser.new_context(
+            user_agent=REAL_UA,
+            viewport={"width": 1280, "height": 850},
+            accept_downloads=True,
+        )
+        page = context.new_page()
 
-            for idx, future in enumerate(as_completed(futures), 1):
-                err = future.result()
-                if err:
-                    failed.append(err)
-                progress_bar.progress(idx / total)
-                status_text.markdown(f"**Processed:** `{idx}/{total}` invoices")
+        # Block media, fonts, and heavy trackers to accelerate loading
+        page.route(
+            "**/*",
+            lambda route: route.abort()
+            if route.request.resource_type in ["image", "media", "font"]
+            else route.continue_()
+        )
+
+        for idx, (name, link) in enumerate(entries, start=1):
+            status_text.markdown(f"**Processing ({idx}/{total}):** `{name}`")
+            progress_bar.progress(idx / total)
+            out_path = TEMP_DIR / f"{name}.pdf"
+            pdf_bytes = []
+
+            def intercept_pdf(response):
+                try:
+                    ctype = response.headers.get("content-type", "").lower()
+                    if "application/pdf" in ctype or ".pdf" in response.url.lower():
+                        b = response.body()
+                        if len(b) > 2000:
+                            pdf_bytes.append(b)
+                except Exception:
+                    pass
+
+            page.on("response", intercept_pdf)
+
+            try:
+                page.goto(link, wait_until="domcontentloaded", timeout=20000)
+                page.wait_for_timeout(1200)
+
+                # Attempt clicking ledger entry card if visible
+                try:
+                    card = page.locator(f"text={name}").first
+                    if card.count() > 0 and card.is_visible():
+                        card.click()
+                        page.wait_for_timeout(1000)
+                except Exception:
+                    pass
+
+                downloaded = False
+
+                # Strategy A: Raw intercepted PDF stream
+                if pdf_bytes:
+                    with open(out_path, "wb") as f:
+                        f.write(pdf_bytes[-1])
+                    downloaded = True
+
+                # Strategy B: UI Download Button
+                if not downloaded:
+                    download_icons = page.locator("header button, div[class*='header'] button, [aria-label*='download' i], svg")
+                    for i in range(min(6, download_icons.count())):
+                        btn = download_icons.nth(i)
+                        try:
+                            box = btn.bounding_box()
+                            if box and box["y"] < 100 and box["x"] > 700:
+                                with page.expect_download(timeout=2000) as dl_info:
+                                    btn.click(force=True)
+                                dl = dl_info.value
+                                dl.save_as(out_path)
+                                downloaded = True
+                                break
+                        except Exception:
+                            continue
+
+                # Strategy C: Direct DOM Print
+                if not downloaded:
+                    page.evaluate("""() => {
+                        const hideList = ['nav', 'header', '.sidebar', '[class*="sidebar"]', '[class*="banner"]', '[class*="drawer"]'];
+                        hideList.forEach(sel => {
+                            document.querySelectorAll(sel).forEach(el => el.style.display = 'none');
+                        });
+                    }""")
+                    page.pdf(
+                        path=str(out_path),
+                        format="A4",
+                        print_background=True,
+                        margin={"top": "8mm", "bottom": "8mm", "left": "8mm", "right": "8mm"}
+                    )
+                    downloaded = True
+
+                if downloaded and out_path.exists() and out_path.stat().st_size > 1000:
+                    log_messages.append(f"✅ [{idx}/{total}] Saved: {name}.pdf")
+                else:
+                    raise Exception("PDF file was not created or is corrupt.")
+
+            except Exception as e:
+                log_messages.append(f"❌ [{idx}/{total}] Failed: {name}")
+                failed.append(f"{name} | {link} | {e}")
+            finally:
+                page.remove_listener("response", intercept_pdf)
+
+            log_area.text_area("Download Terminal Logs", value="\n".join(log_messages[-12:]), height=200)
 
         browser.close()
 
-    # Package into ZIP
-    zip_buffer = io.BytesIO()
-    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-        for file in TEMP_DIR.glob("*.pdf"):
-            zf.write(file, arcname=file.name)
-        if failed:
-            zf.writestr("failed_bills.txt", "\n".join(failed))
-
-    zip_buffer.seek(0)
-    return zip_buffer, len(failed)
-    # Create ZIP archive
+    # Zip output files
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         for file in TEMP_DIR.glob("*.pdf"):
