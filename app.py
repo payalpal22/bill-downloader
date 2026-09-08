@@ -3,9 +3,24 @@ import io
 import re
 import shutil
 import zipfile
+import subprocess
+import sys
 from pathlib import Path
 import streamlit as st
 from playwright.sync_api import sync_playwright
+
+
+# Ensure Playwright browser binaries exist
+try:
+    subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
+except Exception:
+    pass
+
+st.set_page_config(
+    page_title="Bulk Bill Downloader",
+    page_icon="🧾",
+    layout="centered"
+)
 
 st.set_page_config(
     page_title="Bulk Bill Downloader",
