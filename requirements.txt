@@ -1,4 +1,3 @@
 streamlit
-playwright==1.44.0
+playwright
 openpyxl
-requests
