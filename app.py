@@ -7,12 +7,16 @@ import subprocess
 import sys
 from pathlib import Path
 import streamlit as st
-from playwright.sync_api import sync_playwright
 
-
-# Ensure Playwright browser binaries exist
+# Ensure Playwright Chromium binary is present
 try:
-    subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
+    from playwright.sync_api import sync_playwright
+except ImportError:
+    subprocess.run([sys.executable, "-m", "pip", "install", "playwright"])
+    from playwright.sync_api import sync_playwright
+
+try:
+    subprocess.run(["playwright", "install", "chromium"], check=True)
 except Exception:
     pass
 
